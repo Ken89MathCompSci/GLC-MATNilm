@@ -88,7 +88,12 @@ class SubSet(Dataset):
 
         X_scaled = X / 612
         Y_scaled = Y / 612
-        Y_of = np.where(Y > 15, 1, 0)
+        # Appliance-specific thresholds for better classification
+        thresholds = [50, 10, 100, 100]  # dishwasher, fridge, microwave, washer
+        Y_of = np.zeros_like(Y)
+        for i in range(Y.shape[1]):
+            threshold = thresholds[i] if i < len(thresholds) else 15
+            Y_of[:, i] = np.where(Y[:, i] > threshold, 1, 0)
         return X, Y, X_scaled, Y_scaled, Y_of
 
     def __len__(self):

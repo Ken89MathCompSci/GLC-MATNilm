@@ -28,7 +28,7 @@ class BERT4NILMLoss(nn.Module):
         # L1 Loss Term - only for active periods
         l1_loss = torch.mean(torch.abs(y_pred_r - y_true_r) * y_true_c)
 
-        # Combined Loss - simplified to avoid NaN accumulation
-        total_loss = mse_loss + 0.1 * kl_loss + bce_loss + self.lambda_ * l1_loss
+        # Combined Loss - balanced weights for better classification learning
+        total_loss = mse_loss + 0.01 * kl_loss + 2.0 * bce_loss + self.lambda_ * l1_loss
 
         return total_loss
