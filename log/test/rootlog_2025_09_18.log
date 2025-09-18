@@ -14,3 +14,12 @@
 2025-09-18 21:28:18,595 - root - INFO - Initialize model
 2025-09-18 21:28:18,624 - root - INFO - Model MAT
 2025-09-18 21:28:19,623 - root - INFO - Training start
+2025-09-18 21:30:18,881 - root - INFO - Using computation device: cpu
+2025-09-18 21:30:18,882 - root - INFO - Namespace(batch=32, lr=0.001, dropout=0.1, hidden=32, logname='root', subName='test', inputLength=864, outputLength=864, debug=False, dataAug=True, prob0=0.3, prob1=0.6, prob2=0.3, prob3=0.3, test=False, show_graph=False)
+2025-09-18 21:30:18,882 - root - INFO - loading data
+2025-09-18 21:30:18,922 - root - INFO - loading data finished
+2025-09-18 21:30:18,923 - root - INFO - Training size: 27937.
+2025-09-18 21:30:18,923 - root - INFO - Initialize model
+2025-09-18 21:30:18,984 - root - INFO - Model MAT
+2025-09-18 21:30:20,422 - root - INFO - Training start
+2025-09-18 21:30:20,440 - root - INFO - # of epoches: 0
