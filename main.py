@@ -79,9 +79,9 @@ def train(t_net, train_Dataloader, vali_Dataloader, config, criterion, modelDir,
         epoch_losses = np.average(iter_loss)
 
         logger.info(f"Validation: ")
-        maeScore, y_vali_ori, y_vali_pred_d_update, _, _, _ = eval_utils.evaluateResult(net, config, vali_Dataloader, logger)
+        maeScore, y_vali_ori, y_vali_pred_d_update, y_vali_ori_c, y_vali_pred_c, _ = eval_utils.evaluateResult(net, config, vali_Dataloader, logger)
         # val_loss = criterion[0](y_vali_ori, y_vali_pred_d_update)
-        val_loss = criterion(y_vali_ori, y_vali_pred_d_update)
+        val_loss = criterion(y_vali_pred_d_update, y_vali_ori, y_vali_pred_c, y_vali_ori_c)
         logger.info(f"Epoch {e_i:d}, train loss: {epoch_losses:3.3f}, val loss: {val_loss:3.3f}.")
         vali_loss.append(val_loss)
 
