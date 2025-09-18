@@ -1,0 +1,231 @@
+
+import torch
+from torch import nn
+import numpy as np
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
+import math
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+torch.autograd.set_detect_anomaly(True)
+
+# Self-Attention layer
+class ApplSA(nn.Module):
+    def __init__(self, config, LSTM=False, splitLoss=False):
+        super(ApplSA, self).__init__()
+        self.self_attn = nn.MultiheadAttention(2*config.hidden, 2, batch_first=True)
+        d_model = 2*config.hidden
+        dropout = config.dropout
+        self.dropout = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+
+    def _sa_block(self, x):
+        x = self.self_attn(x, x, x)[0]
+        return self.dropout1(x)
+
+    def forward(self, x):
+        x = self.norm1(x + self._sa_block(x))
+        return x
+
+# Feedforward Network
+class ApplFF(nn.Module):
+    def __init__(self, config, LSTM=False, splitLoss=False):
+        super(ApplFF, self).__init__()
+        d_model = 2*config.hidden
+        dim_feedforward = 1024
+        dropout = config.dropout
+        self.dropout = nn.Dropout(dropout)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def _ff_block(self, x):
+        x = self.linear2(self.dropout(torch.relu(self.linear1(x))))
+        return self.dropout2(x)
+
+    def forward(self, x):
+        x = self.norm2(x + self._ff_block(x))
+        return x
+
+# Blocks to split aggregate into single appliance
+class ApplBlock(nn.Module):
+    def __init__(self, config, Last=False, LSTM=False, splitLoss=False):
+        super(ApplBlock, self).__init__()
+        # Dishwasher
+        self.multihead_attn_d = ApplSA(config)
+        # Fridge
+        self.multihead_attn_f = ApplSA(config)
+        # Microwave
+        self.multihead_attn_m = ApplSA(config)
+        # Washing machine
+        self.multihead_attn_w = ApplSA(config)
+
+        self.multihead_attn_r_g = nn.MultiheadAttention(2*config.hidden, 2, batch_first=True)
+        self.norm1 = nn.LayerNorm(2*config.hidden)
+
+        self.dish = ApplFF(config)
+        self.frid = ApplFF(config)
+        self.micro = ApplFF(config)
+        self.wash = ApplFF(config)
+        self.Last = Last
+
+        if Last:
+            self.dish_c = ApplFF(config)
+            self.frid_c = ApplFF(config)
+            self.micro_c = ApplFF(config)
+            self.wash_c = ApplFF(config)
+
+    def forward(self, d_r_a, f_r_a, m_r_a, w_r_a):
+        attn_output_d = self.multihead_attn_d(d_r_a)
+        attn_output_f = self.multihead_attn_f(f_r_a)
+        attn_output_m = self.multihead_attn_m(m_r_a)
+        attn_output_w = self.multihead_attn_w(w_r_a)
+
+        GlobleAtten_r = torch.cat((attn_output_d.unsqueeze(3), attn_output_f.unsqueeze(3), attn_output_m.unsqueeze(3), attn_output_w.unsqueeze(3)),3)
+        GlobleAtten_r = GlobleAtten_r.permute(0,1,3,2)
+        GlobleAtten_r = GlobleAtten_r.reshape(-1,4,GlobleAtten_r.shape[-1])
+
+        # # Global attention
+        attn_output_r_g, attn_output_weights_r_g = self.multihead_attn_r_g(GlobleAtten_r,GlobleAtten_r,GlobleAtten_r)
+        attn_output_r_g = attn_output_r_g.reshape(d_r_a.shape[0],d_r_a.shape[1],4,GlobleAtten_r.shape[-1])
+
+        d_r_a = attn_output_r_g[:,:,0,:]
+        f_r_a = attn_output_r_g[:,:,1,:]
+        m_r_a = attn_output_r_g[:,:,2,:]
+        w_r_a = attn_output_r_g[:,:,3,:]
+
+        d_r_a = self.norm1(d_r_a + attn_output_d)
+        f_r_a = self.norm1(f_r_a + attn_output_f)
+        m_r_a = self.norm1(m_r_a + attn_output_m)
+        w_r_a = self.norm1(w_r_a + attn_output_w)
+
+        d_r = self.dish(d_r_a)
+        f_r = self.frid(f_r_a)
+        m_r = self.micro(m_r_a)
+        w_r = self.wash(w_r_a)
+
+        if self.Last:
+            d_c = self.dish_c(d_r_a)
+            f_c = self.frid_c(f_r_a)
+            m_c = self.micro_c(m_r_a)
+            w_c = self.wash_c(w_r_a)
+            return d_r, f_r, m_r, w_r, d_c, f_c, m_c, w_c
+        return d_r, f_r, m_r, w_r
+
+# Learnable Positional Encodings
+class LearnablePositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(LearnablePositionalEncoding, self).__init__()
+        self.pe = nn.Parameter(torch.zeros(1, max_len, d_model))
+
+    def forward(self, x):
+        seq_len = x.size(1)
+        return x + self.pe[:, :, :seq_len]
+    
+class MultiScaleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(MultiScaleConv, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(in_channels, out_channels, kernel_size=7, padding=3)
+        self.conv3 = nn.Conv1d(in_channels, out_channels, kernel_size=11, padding=5)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        out1 = self.relu(self.conv1(x))
+        out2 = self.relu(self.conv2(x))
+        out3 = self.relu(self.conv3(x))
+        return out1 + out2 + out3
+    
+class AugmentedAttention(nn.Module):
+    def __init__(self, d_model, nhead, dropout=0.1):
+        super(AugmentedAttention, self).__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.temporal_conv = nn.Conv1d(d_model, d_model, kernel_size=3, padding=1)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        attn_output, _ = self.self_attn(x, x, x)
+        conv_output = self.temporal_conv(x.permute(1, 2, 0)).permute(2, 0, 1)
+        output = self.norm(attn_output + conv_output)
+        return self.dropout(output)
+
+class MATconv(nn.Module):
+    def __init__(self, config, LSTM=False, splitLoss=False):
+        super(MATconv, self).__init__()
+        self.input_size = config.input_size
+        self.hidden = config.hidden
+        self.dropout = config.dropout
+        
+        # Learnable Positional Encoding
+        self.positional_encoding = LearnablePositionalEncoding(d_model=2*config.hidden, max_len=config.inputLength)
+        
+        # Transformer Encoder
+        encoder_layers = TransformerEncoderLayer(d_model=2*config.hidden, nhead=8, dropout=config.dropout, batch_first=True)
+        self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers=6)
+
+        # Encoder
+        self.sharedLayer = nn.Sequential(
+            MultiScaleConv(1, 30),
+            nn.ReLU(True),
+            MultiScaleConv(30, 30),
+            nn.ReLU(True),
+            MultiScaleConv(30, 40),
+            nn.ReLU(True),
+            MultiScaleConv(40, 50),
+            nn.ReLU(True),
+            MultiScaleConv(50, 50),
+            nn.ReLU(True),
+            MultiScaleConv(50, int(config.hidden*2)),
+            nn.ReLU(True)
+        )
+
+        self.augmented_attention = AugmentedAttention(d_model=2*config.hidden, nhead=8, dropout=config.dropout)
+
+        # Decoder
+        self.block1 = ApplBlock(config)
+        self.block2 = ApplBlock(config)
+        self.block3 = ApplBlock(config, Last=True)
+
+        # Fully connected layer for appliance regression/classification
+        self.fc_dr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_dc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_fr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_fc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_mr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_mc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_wr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_wc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+
+    def forward(self, input_data):
+        input_data = input_data.permute(0, 2, 1)
+
+        # Add positional encoding
+        input_encoded = self.positional_encoding(input_data)
+
+        input_encoded = self.sharedLayer(input_data)
+        input_encoded = input_encoded.permute(0, 2, 1)
+
+        # Augmented Attention
+        attn_output = self.augmented_attention(input_encoded)
+
+        # Decoder
+        d_r, f_r, m_r, w_r = self.block1(attn_output, attn_output, attn_output, attn_output)
+        d_r, f_r, m_r, w_r = self.block2(d_r, f_r, m_r, w_r)
+        d_rr, f_rr, m_rr, w_rr, d_cc, f_cc, m_cc, w_cc = self.block3(d_r, f_r, m_r, w_r)
+
+        dc = torch.sigmoid(self.fc_dc(d_cc))
+        fc = torch.sigmoid(self.fc_fc(f_cc))
+        mc = torch.sigmoid(self.fc_mc(m_cc))
+        wc = torch.sigmoid(self.fc_wc(w_cc))
+
+        dr = self.fc_dr(d_rr) * dc
+        fr = self.fc_fr(f_rr) * fc
+        mr = self.fc_mr(m_rr) * mc
+        wr = self.fc_wr(w_rr) * wc
+
+        y_pred_r = torch.cat((dr, fr, mr, wr), 2)
+        y_pred_c = torch.cat((dc, fc, mc, wc), 2)
+        return y_pred_r, y_pred_c
