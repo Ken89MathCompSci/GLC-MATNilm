@@ -1,0 +1,16 @@
+2025-09-19 21:24:57,730 - root - INFO - Using computation device: cpu
+2025-09-19 21:24:57,731 - root - INFO - Namespace(batch=32, lr=0.001, dropout=0.1, hidden=32, logname='root', subName='test', inputLength=864, outputLength=864, debug=False, dataAug=False, prob0=0.3, prob1=0.6, prob2=0.3, prob3=0.3, test=True, show_graph=False)
+2025-09-19 21:24:57,731 - root - INFO - loading data
+2025-09-19 21:25:00,334 - root - INFO - loading data finished
+2025-09-19 21:25:00,335 - root - INFO - Training size: 27937.
+2025-09-19 21:25:00,335 - root - INFO - Initialize model
+2025-09-19 21:25:00,405 - root - INFO - Model MAT
+2025-09-19 21:25:02,397 - root - INFO - Loading model from checkpoint: ./history_model/test/s0/All_best_onoff.ckpt
+2025-09-19 21:26:13,339 - root - INFO - Using computation device: cpu
+2025-09-19 21:26:13,339 - root - INFO - Namespace(batch=32, lr=0.001, dropout=0.1, hidden=32, logname='root', subName='test', inputLength=864, outputLength=864, debug=False, dataAug=False, prob0=0.3, prob1=0.6, prob2=0.3, prob3=0.3, test=False, show_graph=False)
+2025-09-19 21:26:13,340 - root - INFO - loading data
+2025-09-19 21:26:13,370 - root - INFO - loading data finished
+2025-09-19 21:26:13,371 - root - INFO - Training size: 27937.
+2025-09-19 21:26:13,371 - root - INFO - Initialize model
+2025-09-19 21:26:13,397 - root - INFO - Model MAT
+2025-09-19 21:26:14,404 - root - INFO - Training start
