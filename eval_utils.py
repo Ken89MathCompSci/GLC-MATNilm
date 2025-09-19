@@ -15,7 +15,12 @@ def evaluate_score(y_real, y_predict, y_real_c, y_pred_c, logger):
     SAE = diff / (1200 * num_period)
     logger.info(f"SAE: {SAE}")
 
-    f1s = f1_score(y_real_c, np.round(y_pred_c))
+    # Debug classification predictions
+    logger.info(f"Ground truth class distribution: {np.bincount(y_real_c.astype(int))}")
+    logger.info(f"Predicted probs range: [{y_pred_c.min():.3f}, {y_pred_c.max():.3f}]")
+    logger.info(f"Predicted class distribution: {np.bincount(np.round(y_pred_c).astype(int))}")
+
+    f1s = f1_score(y_real_c, np.round(y_pred_c), zero_division=0)
     logger.info(f"F1: {f1s}")
 
     return maeScore
