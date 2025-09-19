@@ -1,8 +1,6 @@
 import copy
 import os
 import utils
-import eval_utils
-import sa_utils
 import argparse
 import joblib
 from tqdm import tqdm
@@ -13,14 +11,12 @@ from torch.utils.data import DataLoader
 from custom_types import Basic, TrainConfig
 from modules import MATconv as MAT
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-import matplotlib.pyplot as plt
-import logging
-from loss_func import BERT4NILMLoss
 
-logging.getLogger('matplotlib').setLevel(logging.INFO)
 
 def get_args():
+
     parser = argparse.ArgumentParser()
+
     parser.add_argument("--batch", type=int, default=32, help="batch size")
     parser.add_argument("--lr", type=float, default=0.001, help="learning rate")
     parser.add_argument("--dropout", type=float, default=0.1, help="dropout")
@@ -35,25 +31,27 @@ def get_args():
     parser.add_argument("--prob1", type=float, default=0.6, help="weight")
     parser.add_argument("--prob2", type=float, default=0.3, help="weight")
     parser.add_argument("--prob3", type=float, default=0.3, help="weight")
-    parser.add_argument("--test", action="store_true", help="skip training and only run evaluation")
-    parser.add_argument("--show_graph", action="store_true", help="plot prediction")
+    parser.add_argument("--resume", action="store_true", help="resume training from checkpoint")
+    parser.add_argument("--checkpoint", type=str, default="All_best_onoff.ckpt", help="checkpoint file name to resume from")
     return parser.parse_args()
+
 
 def train(t_net, train_Dataloader, vali_Dataloader, config, criterion, modelDir, epo=200):
     iter_loss = []
     vali_loss = []
-    early_stopping_all = utils.EarlyStopping(logger, patience=20, verbose=True)
+    early_stopping_all = utils.EarlyStopping(logger, patience=30, verbose=True)
 
     if config.dataAug:
-        sigClass = sa_utils.sigGen(config)
+        sigClass = utils.sigGen(config)
 
     path_all = os.path.join(modelDir, "All_best_onoff.ckpt")
 
     for e_i in range(epo):
+
         logger.info(f"# of epoches: {e_i}")
         for t_i, (_, _, X_scaled, Y_scaled, Y_of) in enumerate(tqdm(train_Dataloader)):
             if config.dataAug:
-                X_scaled, Y_scaled, Y_of = sa_utils.dataAug(X_scaled.clone(), Y_scaled.clone(), Y_of.clone(), sigClass, config)
+                X_scaled, Y_scaled, Y_of = utils.dataAug(X_scaled.clone(), Y_scaled.clone(), Y_of.clone(), sigClass, config)
 
             t_net.model_opt.zero_grad(set_to_none=True)
 
@@ -63,14 +61,10 @@ def train(t_net, train_Dataloader, vali_Dataloader, config, criterion, modelDir,
 
             y_pred_dish_r, y_pred_dish_c = t_net.model(X_scaled)
 
-            # OLD LOSS
-            # loss_r = criterion[0](y_pred_dish_r,Y_scaled)
-            # loss_c = criterion[1](y_pred_dish_c, Y_of)
+            loss_r = criterion[0](y_pred_dish_r,Y_scaled)
+            loss_c = criterion[1](y_pred_dish_c, Y_of)
 
-            # loss=loss_r+loss_c
-            # loss.backward()
-
-            loss = criterion(y_pred_dish_r, Y_scaled, y_pred_dish_c, Y_of)
+            loss=loss_r+loss_c
             loss.backward()
 
             t_net.model_opt.step()
@@ -79,9 +73,8 @@ def train(t_net, train_Dataloader, vali_Dataloader, config, criterion, modelDir,
         epoch_losses = np.average(iter_loss)
 
         logger.info(f"Validation: ")
-        maeScore, y_vali_ori, y_vali_pred_d_update, y_vali_ori_c, y_vali_pred_c, _ = eval_utils.evaluateResult(net, config, vali_Dataloader, logger)
-        # val_loss = criterion[0](y_vali_ori, y_vali_pred_d_update)
-        val_loss = criterion(y_vali_ori, y_vali_pred_d_update, y_vali_pred_c, y_vali_ori_c)
+        maeScore, y_vali_ori, y_vali_pred_d_update, _, _, _ = utils.evaluateResult(net, config, vali_Dataloader, logger)
+        val_loss = criterion[0](y_vali_ori, y_vali_pred_d_update)
         logger.info(f"Epoch {e_i:d}, train loss: {epoch_losses:3.3f}, val loss: {val_loss:3.3f}.")
         vali_loss.append(val_loss)
 
@@ -99,6 +92,7 @@ def train(t_net, train_Dataloader, vali_Dataloader, config, criterion, modelDir,
     checkpoint_all = torch.load(path_all, map_location=device)
     utils.loadModel(logger, net_all, checkpoint_all)
     net_all.model.eval()
+    
     return net_all
 
 if __name__ == '__main__':
@@ -113,10 +107,12 @@ if __name__ == '__main__':
     else:
         epo = 200
 
+    # splitLoss = False
+    # trainFull = True
+
     # Dataloder
     logger.info(f"loading data")
     train_data, val_data, test_data = utils.data_loader(args)
-    # aggregate, appliance 1, appliance 2, appliance 3, appliance 4
 
     logger.info(f"loading data finished")
 
@@ -141,6 +137,7 @@ if __name__ == '__main__':
     modelDir = utils.mkdirectory(config.subName, saveModel=True)
     joblib.dump(config, os.path.join(modelDir, "config.pkl"))
 
+
     logger.info(f"Training size: {train_data.cumulative_sizes[-1]:d}.")
 
     index = np.arange(0,train_data.cumulative_sizes[-1])
@@ -149,25 +146,24 @@ if __name__ == '__main__':
         train_data,
         batch_size=config.batch_size,
         sampler=train_subsampler,
-        num_workers=4,
+        num_workers=1,
         pin_memory=True)
 
     sampler = utils.testSampler(val_data.cumulative_sizes[-1], config.outputLength)
     sampler_test = utils.testSampler(test_data.cumulative_sizes[-1], config.outputLength)
-    # sampler len = 915678
 
     vali_Dataloader = DataLoader(
         val_data,
         batch_size=config.batch_size,
         sampler=sampler,
-        num_workers=4,
+        num_workers=1,
         pin_memory=True)
 
     test_Dataloader = DataLoader(
         test_data,
         batch_size=config.batch_size,
         sampler=sampler_test,
-        num_workers=4,
+        num_workers=1,
         pin_memory=True)
 
     logger.info("Initialize model")
@@ -176,116 +172,27 @@ if __name__ == '__main__':
 
     optim = optim.Adam(params=[p for p in model.parameters() if p.requires_grad], lr=config.lr)
     net = Basic(model, optim)
-    # criterion_r = nn.MSELoss()
-    # criterion_c = nn.BCELoss()
-    # criterion = [criterion_r, criterion_c]
-    criterion = BERT4NILMLoss(tau=0.1, lambda_=1.0)
+    
+    # Resume from checkpoint if specified
+    if args.resume:
+        checkpoint_path = os.path.join(modelDir, args.checkpoint)
+        if os.path.exists(checkpoint_path):
+            logger.info(f"Resuming training from checkpoint: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            net = utils.loadModel(logger, net, checkpoint)
+        else:
+            logger.error(f"Checkpoint file not found: {checkpoint_path}")
+            logger.info("Starting training from scratch")
+    
+    criterion_r = nn.MSELoss()
+    criterion_c = nn.BCELoss()
+    criterion = [criterion_r, criterion_c]
 
-    if not args.test:
-        logger.info("Training start")
-        net_all = train(net, train_Dataloader, vali_Dataloader, config, criterion, modelDir, epo=epo)
-        logger.info("Training end")
+    logger.info("Training start")
+    net_all = train(net, train_Dataloader, vali_Dataloader, config, criterion, modelDir, epo=epo)
+    logger.info("Training end")
 
-        logger.info("validation start")
-        eval_utils.evaluateResult(net_all, config, vali_Dataloader, logger)
-        logger.info("test start")
-        eval_utils.evaluateResult(net_all, config, test_Dataloader, logger)
-    else:
-        # Load model from checkpoint
-        checkpointPath = './history_model/test/s0/All_best_onoff.ckpt'
-
-        logger.info(f"Loading model from checkpoint: {checkpointPath}")
-        checkpoint = torch.load(checkpointPath, map_location=device)
-        utils.loadModel(logger, net, checkpoint)
-        net.model.eval()
-
-        logger.info("Running validation on loaded model")
-        eval_utils.evaluateResult(net, config, vali_Dataloader, logger)
-        logger.info("Running test on loaded model")
-        output = eval_utils.evaluateResult(net, config, test_Dataloader, logger)
-        mae, y_ori, y_pred, y_ori_c, y_pred_c, x = output
-        # y_ori, y_pred, y_ori_c, y_pred_c = ['dish washer', 'fridge', 'microwave', 'wash']
-
-        appliances = ['dish washer', 'fridge', 'microwave', 'wash']
-        tp_counts = {appliance: 0 for appliance in appliances}
-        tn_counts = {appliance: 0 for appliance in appliances}
-        fp_counts = {appliance: 0 for appliance in appliances}
-        fn_counts = {appliance: 0 for appliance in appliances}
-
-        # Convert the tensor outputs to numpy arrays
-        y_ori_np = y_ori.cpu().numpy() if torch.is_tensor(y_ori) else y_ori
-        y_pred_np = y_pred.cpu().numpy() if torch.is_tensor(y_pred) else y_pred
-        y_ori_c_np = y_ori_c.cpu().numpy() if torch.is_tensor(y_ori_c) else y_ori_c
-        y_pred_c_np = y_pred_c.cpu().numpy() if torch.is_tensor(y_pred_c) else y_pred_c
-
-        data = []
-
-        header = "x, " + ", ".join([f"{appliance}_ori, {appliance}_pred, {appliance}_ori_c, {appliance}_pred_c" for appliance in appliances])
-        data.append(header)
-
-        for i in range(len(x)):
-            line = f"{x[i]}, " + ", ".join([f"{y_ori_np[i][j]}, {y_pred_np[i][j]}, {y_ori_c_np[i][j]}, {y_pred_c_np[i][j]}" for j in range(len(appliances))])
-            data.append(line)
-
-        # Write the data to a text file
-        txt_path = 'model_output.txt'
-        with open(txt_path, 'w') as f:
-            for line in data:
-                f.write(line + "\n")
-
-        print(f"Model output saved to {txt_path}")
-
-        pred_threshold = 0.5
-        y_pred_bin = np.array([[1 if pred > pred_threshold else 0 for pred in appliance_preds] for appliance_preds in y_pred_c])
-
-        for i, appliance in enumerate(appliances):
-            y_true = np.array([x[i] for x in y_ori_c])
-            y_pred_value = y_pred_bin[:, i]
-            
-            tp_counts[appliance] = np.sum((y_true == 1) & (y_pred_value == 1))
-            tn_counts[appliance] = np.sum((y_true == 0) & (y_pred_value == 0))
-            fp_counts[appliance] = np.sum((y_true == 0) & (y_pred_value == 1))
-            fn_counts[appliance] = np.sum((y_true == 1) & (y_pred_value == 0))
-
-        for appliance in appliances:
-            print(f"{appliance.capitalize()}:")
-            print(f"  True Positives: {tp_counts[appliance]}")
-            print(f"  True Negatives: {tn_counts[appliance]}")
-            print(f"  False Positives: {fp_counts[appliance]}")
-            print(f"  False Negatives: {fn_counts[appliance]}")
-            print()
-
-        if args.show_graph:
-            appliances = ['Dish Washer', 'Fridge', 'Microwave', 'Wash']
-            y_ori_np = y_ori.cpu().numpy() if torch.is_tensor(y_ori) else y_ori
-            y_pred_np = y_pred.cpu().numpy() if torch.is_tensor(y_pred) else y_pred
-            fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
-            for i in range(4):
-                axes[i].plot(y_ori_np[:, i], label='Original', alpha=0.7)
-                axes[i].plot(y_pred_np[:, i], label='Predicted', alpha=0.7)
-                axes[i].set_title(appliances[i])
-                axes[i].legend()
-            plt.xlabel('Sample Index')
-            plt.ylabel('Value')
-            plt.suptitle('Original vs Predicted Values for Each Appliance')
-
-            # Show plot
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
-            plt.show()
-
-            # Plot classification results for each appliance
-            y_ori_c_np = y_ori_c.cpu().numpy() if torch.is_tensor(y_ori_c) else y_ori_c
-            y_pred_c_np = y_pred_c.cpu().numpy() if torch.is_tensor(y_pred_c) else y_pred_c
-            y_pred_c_binary = (y_pred_c_np > pred_threshold).astype(int)
-            fig, axes = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
-            for i in range(4):
-                axes[i].plot(y_ori_c_np[:, i], label='Original Class', alpha=0.7)
-                axes[i].plot(y_pred_c_binary[:, i], label='Predicted Class', alpha=0.7)
-                axes[i].set_title(appliances[i])
-                axes[i].legend()
-            plt.xlabel('Sample Index')
-            plt.ylabel('Class')
-            plt.suptitle('Original vs Predicted Classification for Each Appliance')
-
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
-            plt.show()
+    logger.info("validation start")
+    utils.evaluateResult(net_all, config, vali_Dataloader, logger)
+    logger.info("test start")
+    utils.evaluateResult(net_all, config, test_Dataloader, logger)

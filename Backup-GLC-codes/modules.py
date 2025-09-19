@@ -1,32 +1,25 @@
-import math
 
 import torch
 from torch import nn
-from torch.autograd import Variable
-from torch.nn import functional as tf
 import numpy as np
-
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
+import math
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 torch.autograd.set_detect_anomaly(True)
 
-import torch
-from torch import nn
-
+# Self-Attention layer
 class ApplSA(nn.Module):
-
     def __init__(self, config, LSTM=False, splitLoss=False):
-
         super(ApplSA, self).__init__()
         self.self_attn = nn.MultiheadAttention(2*config.hidden, 2, batch_first=True)
         d_model = 2*config.hidden
-        dim_feedforward = 1024
         dropout = config.dropout
         self.dropout = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
-    
+
     def _sa_block(self, x):
         x = self.self_attn(x, x, x)[0]
         return self.dropout1(x)
@@ -35,10 +28,9 @@ class ApplSA(nn.Module):
         x = self.norm1(x + self._sa_block(x))
         return x
 
+# Feedforward Network
 class ApplFF(nn.Module):
-
     def __init__(self, config, LSTM=False, splitLoss=False):
-
         super(ApplFF, self).__init__()
         d_model = 2*config.hidden
         dim_feedforward = 1024
@@ -57,15 +49,17 @@ class ApplFF(nn.Module):
         x = self.norm2(x + self._ff_block(x))
         return x
 
-
+# Blocks to split aggregate into single appliance
 class ApplBlock(nn.Module):
-
     def __init__(self, config, Last=False, LSTM=False, splitLoss=False):
-
         super(ApplBlock, self).__init__()
+        # Dishwasher
         self.multihead_attn_d = ApplSA(config)
+        # Fridge
         self.multihead_attn_f = ApplSA(config)
+        # Microwave
         self.multihead_attn_m = ApplSA(config)
+        # Washing machine
         self.multihead_attn_w = ApplSA(config)
 
         self.multihead_attn_r_g = nn.MultiheadAttention(2*config.hidden, 2, batch_first=True)
@@ -76,6 +70,7 @@ class ApplBlock(nn.Module):
         self.micro = ApplFF(config)
         self.wash = ApplFF(config)
         self.Last = Last
+
         if Last:
             self.dish_c = ApplFF(config)
             self.frid_c = ApplFF(config)
@@ -90,12 +85,10 @@ class ApplBlock(nn.Module):
 
         GlobleAtten_r = torch.cat((attn_output_d.unsqueeze(3), attn_output_f.unsqueeze(3), attn_output_m.unsqueeze(3), attn_output_w.unsqueeze(3)),3)
         GlobleAtten_r = GlobleAtten_r.permute(0,1,3,2)
-        # TODO: change 4
         GlobleAtten_r = GlobleAtten_r.reshape(-1,4,GlobleAtten_r.shape[-1])
 
-        # # Globle attention
+        # # Global attention
         attn_output_r_g, attn_output_weights_r_g = self.multihead_attn_r_g(GlobleAtten_r,GlobleAtten_r,GlobleAtten_r)
-        # TODO: change 4
         attn_output_r_g = attn_output_r_g.reshape(d_r_a.shape[0],d_r_a.shape[1],4,GlobleAtten_r.shape[-1])
 
         d_r_a = attn_output_r_g[:,:,0,:]
@@ -119,7 +112,6 @@ class ApplBlock(nn.Module):
             m_c = self.micro_c(m_r_a)
             w_c = self.wash_c(w_r_a)
             return d_r, f_r, m_r, w_r, d_c, f_c, m_c, w_c
-
         return d_r, f_r, m_r, w_r
 
 # Learnable Positional Encodings
@@ -131,82 +123,96 @@ class LearnablePositionalEncoding(nn.Module):
     def forward(self, x):
         seq_len = x.size(1)
         return x + self.pe[:, :, :seq_len]
+    
+class MultiScaleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(MultiScaleConv, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(in_channels, out_channels, kernel_size=7, padding=3)
+        self.conv3 = nn.Conv1d(in_channels, out_channels, kernel_size=11, padding=5)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        out1 = self.relu(self.conv1(x))
+        out2 = self.relu(self.conv2(x))
+        out3 = self.relu(self.conv3(x))
+        return out1 + out2 + out3
+    
+class AugmentedAttention(nn.Module):
+    def __init__(self, d_model, nhead, dropout=0.1):
+        super(AugmentedAttention, self).__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.temporal_conv = nn.Conv1d(d_model, d_model, kernel_size=3, padding=1)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        attn_output, _ = self.self_attn(x, x, x)
+        conv_output = self.temporal_conv(x.permute(1, 2, 0)).permute(2, 0, 1)
+        output = self.norm(attn_output + conv_output)
+        return self.dropout(output)
 
 class MATconv(nn.Module):
-
     def __init__(self, config, LSTM=False, splitLoss=False):
-
         super(MATconv, self).__init__()
         self.input_size = config.input_size
-
+        self.hidden = config.hidden
+        self.dropout = config.dropout
+        
         # Learnable Positional Encoding
-        self.positional_encoding = LearnablePositionalEncoding(
-            d_model=int(config.hidden*2),
-            max_len=config.inputLength
-        )
+        self.positional_encoding = LearnablePositionalEncoding(d_model=2*config.hidden, max_len=config.inputLength)
+        
+        # Transformer Encoder
+        encoder_layers = TransformerEncoderLayer(d_model=2*config.hidden, nhead=8, dropout=config.dropout, batch_first=True)
+        self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers=6)
 
+        # Encoder
         self.sharedLayer = nn.Sequential(
-            nn.Conv1d(1, 30, kernel_size=10, padding='same'),
+            MultiScaleConv(1, 30),
             nn.ReLU(True),
-            nn.Conv1d(30, 30, kernel_size=8, padding='same'),
+            MultiScaleConv(30, 30),
             nn.ReLU(True),
-            nn.Conv1d(30, 40, kernel_size=6, padding='same'),
+            MultiScaleConv(30, 40),
             nn.ReLU(True),
-            nn.Conv1d(40, 50, kernel_size=5, padding='same'),
+            MultiScaleConv(40, 50),
             nn.ReLU(True),
-            nn.Conv1d(50, 50, kernel_size=5, padding='same'),
+            MultiScaleConv(50, 50),
             nn.ReLU(True),
-            nn.Conv1d(50, int(config.hidden*2), kernel_size=5, padding='same'),
+            MultiScaleConv(50, int(config.hidden*2)),
             nn.ReLU(True)
         )
 
+        self.augmented_attention = AugmentedAttention(d_model=2*config.hidden, nhead=8, dropout=config.dropout)
+
+        # Decoder
         self.block1 = ApplBlock(config)
         self.block2 = ApplBlock(config)
-        self.block3 = ApplBlock(config,Last=True)
+        self.block3 = ApplBlock(config, Last=True)
 
-
-        self.fc_dr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden),
-                                   nn.ReLU(),
-                                   nn.Linear(config.hidden, 1))
-        self.fc_dc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden),
-                                   nn.ReLU(),
-                                   nn.Linear(config.hidden, 1))
-        self.fc_fr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden),
-                                   nn.ReLU(),
-                                   nn.Linear(config.hidden, 1))
-        self.fc_fc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden),
-                                   nn.ReLU(),
-                                   nn.Linear(config.hidden, 1))
-        self.fc_mr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden),
-                                   nn.ReLU(),
-                                   nn.Linear(config.hidden, 1))
-        self.fc_mc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden),
-                                   nn.ReLU(),
-                                   nn.Linear(config.hidden, 1))
-
-        self.fc_wr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden),
-                                   nn.ReLU(),
-                                   nn.Linear(config.hidden, 1))
-        self.fc_wc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden),
-                                   nn.ReLU(),
-                                   nn.Linear(config.hidden, 1))
+        # Fully connected layer for appliance regression/classification
+        self.fc_dr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_dc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_fr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_fc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_mr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_mc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_wr = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
+        self.fc_wc = nn.Sequential(nn.Linear(2*config.hidden, config.hidden), nn.ReLU(), nn.Linear(config.hidden, 1))
 
     def forward(self, input_data):
-
-        # feature weighting
-        # attn_weights = torch.softmax(self.attn_layer(input_data), 2)
-        # weighted_input = torch.mul(attn_weights, input_data)
-        # skip_x =
-        # self.sharedLayer.flatten_parameters()
-        input_data = input_data.permute(0,2,1)
-        input_encoded = self.sharedLayer(input_data)  # input(1, batch_size, input_size)
-        input_encoded = input_encoded.permute(0,2,1)
+        input_data = input_data.permute(0, 2, 1)
 
         # Add positional encoding
-        input_encoded = self.positional_encoding(input_encoded)
+        input_encoded = self.positional_encoding(input_data)
 
-        # Attention
-        d_r, f_r, m_r, w_r = self.block1(input_encoded, input_encoded, input_encoded, input_encoded)
+        input_encoded = self.sharedLayer(input_data)
+        input_encoded = input_encoded.permute(0, 2, 1)
+
+        # Augmented Attention
+        attn_output = self.augmented_attention(input_encoded)
+
+        # Decoder
+        d_r, f_r, m_r, w_r = self.block1(attn_output, attn_output, attn_output, attn_output)
         d_r, f_r, m_r, w_r = self.block2(d_r, f_r, m_r, w_r)
         d_rr, f_rr, m_rr, w_rr, d_cc, f_cc, m_cc, w_cc = self.block3(d_r, f_r, m_r, w_r)
 
@@ -215,17 +221,11 @@ class MATconv(nn.Module):
         mc = torch.sigmoid(self.fc_mc(m_cc))
         wc = torch.sigmoid(self.fc_wc(w_cc))
 
-        # dr = torch.relu(self.fc_dr(d_rr)) * dc
-        # fr = torch.relu(self.fc_fr(f_rr)) * fc
-        # mr = torch.relu(self.fc_mr(m_rr)) * mc
-        # wr = torch.relu(self.fc_wr(w_rr)) * wc
-
         dr = self.fc_dr(d_rr) * dc
         fr = self.fc_fr(f_rr) * fc
         mr = self.fc_mr(m_rr) * mc
         wr = self.fc_wr(w_rr) * wc
 
-        y_pred_r = torch.cat((dr,fr,mr, wr),2)
-        y_pred_c = torch.cat((dc,fc,mc, wc),2)
-        # print(y_pred_r.shape)
+        y_pred_r = torch.cat((dr, fr, mr, wr), 2)
+        y_pred_c = torch.cat((dc, fc, mc, wc), 2)
         return y_pred_r, y_pred_c
