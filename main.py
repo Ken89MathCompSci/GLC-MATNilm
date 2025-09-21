@@ -10,6 +10,7 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 from custom_types import Basic, TrainConfig
 from modules import MATconv as MAT
+from loss_func import BERT4NILMLoss
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 
@@ -61,10 +62,7 @@ def train(t_net, train_Dataloader, vali_Dataloader, config, criterion, modelDir,
 
             y_pred_dish_r, y_pred_dish_c = t_net.model(X_scaled)
 
-            loss_r = criterion[0](y_pred_dish_r,Y_scaled)
-            loss_c = criterion[1](y_pred_dish_c, Y_of)
-
-            loss=loss_r+loss_c
+            loss = criterion(y_pred_dish_r, Y_scaled, y_pred_dish_c, Y_of)
             loss.backward()
 
             t_net.model_opt.step()
@@ -73,8 +71,8 @@ def train(t_net, train_Dataloader, vali_Dataloader, config, criterion, modelDir,
         epoch_losses = np.average(iter_loss)
 
         logger.info(f"Validation: ")
-        maeScore, y_vali_ori, y_vali_pred_d_update, _, _, _ = utils.evaluateResult(net, config, vali_Dataloader, logger)
-        val_loss = criterion[0](y_vali_ori, y_vali_pred_d_update)
+        maeScore, y_vali_ori, y_vali_pred_d_update, y_vali_pred_c, y_vali_ori_c, _ = utils.evaluateResult(net, config, vali_Dataloader, logger)
+        val_loss = criterion(y_vali_ori, y_vali_pred_d_update, y_vali_pred_c, y_vali_ori_c)
         logger.info(f"Epoch {e_i:d}, train loss: {epoch_losses:3.3f}, val loss: {val_loss:3.3f}.")
         vali_loss.append(val_loss)
 
@@ -184,9 +182,7 @@ if __name__ == '__main__':
             logger.error(f"Checkpoint file not found: {checkpoint_path}")
             logger.info("Starting training from scratch")
     
-    criterion_r = nn.MSELoss()
-    criterion_c = nn.BCELoss()
-    criterion = [criterion_r, criterion_c]
+    criterion = BERT4NILMLoss(tau=0.1, lambda_=1.0)
 
     logger.info("Training start")
     net_all = train(net, train_Dataloader, vali_Dataloader, config, criterion, modelDir, epo=epo)
