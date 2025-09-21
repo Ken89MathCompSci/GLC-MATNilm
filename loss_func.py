@@ -14,18 +14,19 @@ class BERT4NILMLoss(nn.Module):
         # Mean Squared Error Loss
         mse_loss = self.criterion_r(y_pred_r, y_true_r)
 
-        # KL Divergence Loss
+        # KL Divergence Loss (with numerical stability)
         softmax_pred = F.softmax(y_pred_r / self.tau, dim=-1)
         softmax_true = F.softmax(y_true_r / self.tau, dim=-1)
-        kl_loss = F.kl_div(softmax_pred.log(), softmax_true, reduction='batchmean')
+        # Add small epsilon to prevent log(0)
+        kl_loss = F.kl_div((softmax_pred + 1e-8).log(), softmax_true, reduction='batchmean')
 
-        # Soft-Margin Loss
-        soft_margin_loss = torch.mean(torch.log(1 + torch.exp(-y_true_c * y_pred_c)))
+        # Binary Cross Entropy Loss (more stable than soft-margin)
+        bce_loss = self.criterion_c(y_pred_c, y_true_c)
 
-        # L1 Loss Term
-        l1_loss = torch.mean(torch.abs(y_pred_r - y_true_r) * (y_true_c > 0.5).float())
+        # L1 Loss Term (only for active appliances)
+        l1_loss = torch.mean(torch.abs(y_pred_r - y_true_r) * y_true_c)
 
-        # Combined Loss
-        total_loss = mse_loss + kl_loss + soft_margin_loss + self.lambda_ * l1_loss
+        # Combined Loss (removed unstable soft-margin loss)
+        total_loss = mse_loss + kl_loss + bce_loss + self.lambda_ * l1_loss
 
         return total_loss

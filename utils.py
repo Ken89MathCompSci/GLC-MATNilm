@@ -84,7 +84,12 @@ def evaluate_score(y_real, y_predict, y_real_c, y_pred_c, logger):
     SAE = sae(y_real, y_predict, 1200)
     logger.info(f"SAE: {SAE}")
 
-    f1s = f1_score(y_real_c, np.round(y_pred_c))
+    # Debug classification predictions
+    logger.info(f"Ground truth class distribution: {np.bincount(y_real_c.astype(int))}")
+    logger.info(f"Predicted probs range: [{y_pred_c.min():.3f}, {y_pred_c.max():.3f}]")
+    logger.info(f"Predicted class distribution: {np.bincount(np.round(y_pred_c).astype(int))}")
+
+    f1s = f1_score(y_real_c, np.round(y_pred_c), zero_division=0)
     logger.info(f"F1: {f1s}")
 
     return maeScore
@@ -204,7 +209,7 @@ class SubSet(Dataset):
 
         X_scaled = X/612
         Y_scaled = Y/612
-        Y_of = np.where(Y > 15, 1, 0)
+        Y_of = np.where(Y > 25, 1, 0)  # Increased threshold for more meaningful ON states
 
         return X, Y, X_scaled, Y_scaled, Y_of
 
@@ -349,7 +354,7 @@ def dataAug( X_scaled, Y_scaled, Y_of, sigClass, config):
                     sig = vertScale2(sig)
 
                 sig = selectPortion(config, sig, llen)
-                y_of = torch.where(sig > 15/612, torch.Tensor([1]), torch.Tensor([0]))
+                y_of = torch.where(sig > 25/612, torch.Tensor([1]), torch.Tensor([0]))
                 if j < orilen:
                     Y_scaled[i,:,j] += sig
                     Y_of[i, :, j] = y_of
