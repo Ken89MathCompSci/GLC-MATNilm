@@ -132,6 +132,34 @@ class LearnablePositionalEncoding(nn.Module):
         seq_len = x.size(1)
         return x + self.pe[:, :, :seq_len]
 
+class MultiScaleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(MultiScaleConv, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(in_channels, out_channels, kernel_size=7, padding=3)
+        self.conv3 = nn.Conv1d(in_channels, out_channels, kernel_size=11, padding=5)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        out1 = self.relu(self.conv1(x))
+        out2 = self.relu(self.conv2(x))
+        out3 = self.relu(self.conv3(x))
+        return out1 + out2 + out3
+    
+class AugmentedAttention(nn.Module):
+    def __init__(self, d_model, nhead, dropout=0.1):
+        super(AugmentedAttention, self).__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.temporal_conv = nn.Conv1d(d_model, d_model, kernel_size=3, padding=1)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        attn_output, _ = self.self_attn(x, x, x)
+        conv_output = self.temporal_conv(x.permute(1, 2, 0)).permute(2, 0, 1)
+        output = self.norm(attn_output + conv_output)
+        return self.dropout(output)
+
 class MATconv(nn.Module):
 
     def __init__(self, config, LSTM=False, splitLoss=False):
